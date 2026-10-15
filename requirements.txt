@@ -1,9 +1,0 @@
-pandas
-numpy
-scikit-learn
-matplotlib
-seaborn
-scikit-surprise
-fastapi
-uvicorn
-joblib

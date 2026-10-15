@@ -1,73 +1,97 @@
-# RepoReader AI
+# Movie Recommendation System
 
-## 1. Project Overview
-RepoReader AI is a repository analysis system that fetches selected files from public GitHub repositories, processes them with Gemini 2.5 Flash, and returns structured architecture and security insights.  
-It extracts key project files through the GitHub Contents API, performs autonomous code analysis, and generates a Mermaid-compatible architecture diagram alongside security alerts.  
-This project was built for the MLH AI Hackfest.
+A collaborative-filtering movie recommender built on the MovieLens 1M dataset. It factorizes the user–movie rating matrix with Truncated SVD, predicts ratings for unseen movies, and returns a balanced list of **3 mainstream + 2 niche** recommendations per user, with a penalty for sequels whose prequel the user hasn't watched.
 
-## 2. System Architecture & Flow
-- **Frontend (Streamlit):** Accepts a GitHub repository URL from the user and sends it to the backend.
-- **Backend (FastAPI):** Parses `owner/repo` from the URL, requests target files from GitHub, and Base64-decodes file content.
-- **AI Agent (Gemini 2.5 Flash):** Analyzes aggregated repository context and returns strict JSON with `summary`, `security_alerts`, and `mermaid_diagram`.
-- **UI Rendering:** Mermaid code is sanitized and rendered inside an HTML widget in Streamlit.
+## Dataset
 
-## 3. Tech Stack
-- Python
-- FastAPI
-- Streamlit
-- Google Generative AI (`google-generativeai`)
-- Mermaid.js (rendered via Streamlit HTML component)
-- Requests
-- Pydantic
-- Python Dotenv
+[MovieLens 1M](https://grouplens.org/datasets/movielens/1m/) (GroupLens Research):
 
-## 4. Installation & Setup
-1. Clone the repository:
-   ```bash
-   git clone <your-repository-url>
-   cd repo-reader-ai
-   ```
-2. Create a `.env` file in the project root and set:
-   ```env
-   GEMINI_API_KEY=your_gemini_api_key
-   ```
-   `GEMINI_API_KEY` is mandatory. The application raises an error at startup if it is missing.
-3. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
+| File | Rows | Columns |
+|---|---|---|
+| `data/raw/ratings.csv` | 1,000,209 | `userId;movieId;rating;timestamp` |
+| `data/raw/movies.csv` | 3,883 | `movieId;title;genres` |
+| `data/raw/users.csv` | 6,040 | `userId;gender;age;occupation;zip-code` |
 
-## 5. Running the Application
-Run backend and frontend in separate terminals.
+Files are `;`-separated and `latin-1` encoded. See `data/raw/README` for the dataset's license and citation.
 
-- **Terminal 1 (Backend):**
-  ```bash
-  uvicorn main:app --reload --port 8000
-  ```
-- **Terminal 2 (Frontend):**
-  ```bash
-  streamlit run frontend.py
-  ```
+## How it works
 
-The frontend sends requests to:
-`http://127.0.0.1:8000/api/analyze`
+1. **Preprocessing** (`src/data_loader.py`)
+   - Merges ratings with movie titles.
+   - Keeps only active users (≥ 50 ratings) and popular movies (≥ 50 ratings) to reduce sparsity.
+   - Builds a `userId × title` pivot matrix and applies **mean centering** per user; missing values become 0.
+2. **Model** (`src/engine.py`)
+   - `TruncatedSVD` with 50 latent factors on the centered matrix.
+   - Predicted ratings = `user_features · movie_features + user mean`.
+   - The prediction matrix is cached to `models/svd_predictions.pkl` with `joblib`; later runs load it instead of retraining.
+3. **Evaluation** (`src/evaluator.py`)
+   - RMSE between actual ratings and predictions on the observed (user, movie) pairs.
+4. **Recommendation** (`src/recommender.py`)
+   - Ranks unseen movies by predicted score.
+   - Movies with more than 1,000 ratings count as *Mainstream*, the rest as *Niche*; the final list holds 3 Mainstream and 2 Niche movies.
+   - **Sequel awareness:** if a movie has a prequel the user hasn't watched, its score is multiplied by 0.8.
 
-## 6. LLM Prompt Strategy
-The AI agent is constrained with deterministic prompt rules to control output quality and parsing reliability:
-- Repository files are concatenated into a single context block with per-file boundaries.
-- Token optimization is applied by truncating each file to **10KB** (`10000` characters) when needed.
-- The model is forced to return JSON (`response_mime_type = application/json`) and parsed as structured data.
-- A strict schema is enforced with exactly three outputs:
-  - `summary` (2-3 sentences)
-  - `security_alerts` (list of findings)
-  - `mermaid_diagram` (simple `graph TD` syntax)
-- Mermaid generation is restricted with hard rules to reduce rendering failures:
-  - no brackets `[]`
-  - no parentheses `()`
-  - alphabetical node names only
-  - no spaces in node names
-  - semicolon-separated statements
+## Project structure
 
-## 7. Future Improvements
-- [ ] Add OAuth-based GitHub integration to support analysis of private repositories.
-- [ ] Add RAG (Retrieval-Augmented Generation) for large repositories or migrate to models with larger token windows.
+```
+├── data/raw/             # MovieLens 1M CSVs
+├── models/               # Saved prediction matrix (created on first run)
+├── notebooks/
+│   ├── 01_eda.ipynb
+│   ├── 02_baseline_recommender.ipynb
+│   ├── 03_collaborative_filtering.ipynb
+│   └── 04_matrix_factorization.ipynb
+├── src/
+│   ├── data_loader.py    # Loading, filtering, pivot + mean centering
+│   ├── engine.py         # SVD training, saving/loading the model
+│   ├── evaluator.py      # RMSE
+│   ├── recommender.py    # Hybrid 3 mainstream + 2 niche recommendations
+│   └── api/main.py       # End-to-end pipeline entry point
+├── pyproject.toml
+└── requirements.txt
+```
+
+## Setup
+
+```bash
+git clone https://github.com/ism00efe/movie-recommendation-system.git
+cd movie-recommendation-system
+python -m venv venv
+venv\Scripts\activate        # Windows
+# source venv/bin/activate   # macOS / Linux
+pip install -r requirements.txt
+```
+
+## Usage
+
+Run the full pipeline (load → train or load model → RMSE → recommendations) from the project root:
+
+```bash
+python src/api/main.py
+```
+
+The first run trains the SVD model and saves it to `models/svd_predictions.pkl`; subsequent runs reuse it. The script prints the matrix size, the RMSE score and 5 recommendations for user `42`. Change `user_id` in `src/api/main.py` to get recommendations for another user.
+
+Example of using the modules directly:
+
+```python
+from src import load_and_preprocess, create_pivot_matrix, train_model, get_hybrid_recommendations
+
+df = load_and_preprocess("data/raw/ratings.csv", "data/raw/movies.csv")
+matrix, matrix_norm = create_pivot_matrix(df)
+predictions = train_model(matrix, matrix_norm, n_components=50)
+
+recs = get_hybrid_recommendations(42, predictions, matrix, df, movie_sequels={})
+print(recs)
+```
+
+## Tech stack
+
+Python · pandas · NumPy · scikit-learn (TruncatedSVD) · joblib · Jupyter
+
+## Future improvements
+
+- [ ] Serve recommendations through a FastAPI endpoint.
+- [ ] Evaluate on a held-out test split instead of the training ratings.
+- [ ] Build the sequel map automatically instead of a hand-written dictionary.
+- [ ] Containerize with Docker.
